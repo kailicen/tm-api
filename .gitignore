@@ -1,5 +1,32 @@
+# Virtual environment
 venv/
+
+# Bytecode files
 __pycache__/
+*.py[cod]
+*.pyo
+
+# Environment files
 .env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Selenium binaries
 chromedriver.exe
-*.pyc
+
+# Docker files
+*.log
+
+# VSCode settings (optional, if using workspace-specific configs)
+.vscode/
+
+# Test artifacts (if you write tests later)
+htmlcov/
+coverage.xml
+.cache
+pytest_cache/
+
+# Heroku or Fly.io cache (if using Docker build cache)
+.buildpacks
