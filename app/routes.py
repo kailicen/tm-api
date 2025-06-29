@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import List
 from app.models import supabase
 from app.scraper import fetch_and_save_agendas
+from app.assignment import get_suggested_assignments
+from app.utils.constants import SKIP_ASSIGNMENT_ROLES
 
 router = APIRouter()
 
@@ -21,15 +23,6 @@ def health_check():
 def sync_agendas():
     logs = fetch_and_save_agendas()
     return {"logs": logs}
-
-# Single assignment insert (optional, keep if needed)
-@router.post("/assignments")
-def save_assignment(payload: Assignment):
-    try:
-        response = supabase.table('assignments').insert(payload.dict()).execute()
-        return {"success": True, "data": response.data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # Bulk assignment insert
 @router.post("/assignments/bulk")
@@ -63,35 +56,50 @@ def get_assignments(meeting_date: str = Query(..., description="Date in YYYY-MM-
 @router.get("/agenda/{meeting_date}")
 def get_agenda(meeting_date: str):
     try:
-        # Get all agenda records for the date
+        # Fetch agenda for selected date
         agenda_res = supabase.table('agendas').select("*").eq('meeting_date', meeting_date).execute()
-        agenda_data = agenda_res.data
+        if not agenda_res.data:
+            raise HTTPException(status_code=404, detail="Agenda not found")
 
-        if not agenda_data:
-            raise HTTPException(status_code=404, detail="Agenda not found for this date")
+        agenda_data = []
+        for item in agenda_res.data:
+            agenda_data.extend(item['agenda_json'])
 
-        # Get all distinct dates for the date selector
-        dates_res = supabase.table('agendas').select('meeting_date').execute()
-        all_dates = sorted(set(item['meeting_date'] for item in dates_res.data), reverse=True)
+        # Fetch past agendas before this date
+        past_res = supabase.table('agendas').select("*").lt('meeting_date', meeting_date).execute()
+        past_data = []
+        for item in past_res.data:
+            for agenda_item in item['agenda_json']:
+                if agenda_item['Name']:
+                    past_data.append({
+                        'Name': agenda_item['Name'],
+                        'Role': agenda_item['Role'],
+                        'MeetingDate': item['meeting_date']
+                    })
 
-        # Get saved assignments for this date
+        # Fetch all members
+        members_res = supabase.table('members').select('name').execute()
+        members = [m['name'] for m in members_res.data if m['name']]
+
+        # Fetch saved assignments
         assignments_res = supabase.table('assignments').select("*").eq('meeting_date', meeting_date).execute()
         saved_assignments = {item['role']: item['assigned'] for item in assignments_res.data}
 
-        # Combine agenda with saved assignments
-        combined = []
-        for agenda in agenda_data:
-            for item in agenda['agenda_json']:  # Loop over the list inside agenda_json
-                combined.append({
-                    "Role": item['Role'],
-                    "Original": item['Name'],
-                    "Primary": saved_assignments.get(item['Role'], item['Name']),
-                    "Backup": item.get('Backup', "—")
-                })
+        # Get all distinct dates
+        dates_res = supabase.table('agendas').select('meeting_date').execute()
+        all_dates = sorted(set(item['meeting_date'] for item in dates_res.data), reverse=True)
+
+        # Get suggested assignments
+        suggested = get_suggested_assignments(agenda_data, past_data, members)
+
+        # Override Primary if saved assignments exist
+        for item in suggested:
+            if item['Role'] in saved_assignments:
+                item['Primary'] = saved_assignments[item['Role']]
 
         return {
             "allDates": all_dates,
-            "agenda": combined
+            "agenda": suggested
         }
 
     except Exception as e:
@@ -126,33 +134,63 @@ def get_assignment_dates():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from app.utils.constants import SKIP_ASSIGNMENT_ROLES  # If not already imported
+
 @router.get("/members/progress")
 def get_member_progress():
     try:
         df_roles = supabase.table('agendas').select("*").execute()
-        if not df_roles.data:
+        members_res = supabase.table('members').select('name').execute()
+
+        if not members_res.data:
             return {"report": []}
 
         import pandas as pd
         from datetime import datetime
 
-        df = pd.DataFrame([item['agenda_json'] for item in df_roles.data])
-        df['MeetingDate'] = [item['meeting_date'] for item in df_roles.data]
-        df['MeetingDate'] = pd.to_datetime(df['MeetingDate'])
+        # All member names
+        all_members = sorted(set(item['name'] for item in members_res.data if item['name']))
+
+        # Flatten agenda_json
+        flat_rows = []
+        for record in df_roles.data:
+            meeting_date = record['meeting_date']
+            for item in record['agenda_json']:
+                if item.get('Name'):
+                    flat_rows.append({
+                        "Name": item['Name'],
+                        "Role": item['Role'],
+                        "MeetingDate": meeting_date
+                    })
+
+        df = pd.DataFrame(flat_rows)
+
+        if not df.empty:
+            # Apply skip roles filter
+            df = df[
+                ~(
+                    df["Role"].isin(SKIP_ASSIGNMENT_ROLES) |
+                    df["Role"].str.startswith("Theme for the meeting")
+                )
+            ]
+            df['MeetingDate'] = pd.to_datetime(df['MeetingDate'])
 
         today = pd.Timestamp.today().normalize()
         report = []
 
-        for name in sorted(df['Name'].dropna().unique()):
-            member_roles = df[df['Name'] == name].sort_values('MeetingDate', ascending=False)
-            total = len(member_roles)
-            recent = member_roles.head(3)['Role'].tolist()
-            last_date = member_roles['MeetingDate'].max().date() if total > 0 else None
+        for name in all_members:
+            if not df.empty and name in df['Name'].values:
+                member_roles = df[df['Name'] == name].sort_values('MeetingDate', ascending=False)
+                total = len(member_roles)
+                recent = member_roles.head(3)['Role'].tolist()
+                last_date = member_roles['MeetingDate'].max().date()
 
-            if last_date:
                 days_since = (today.date() - last_date).days
                 gap = "✅" if days_since < 21 else f"❌ No roles in {days_since} days"
             else:
+                total = 0
+                recent = []
+                last_date = None
                 gap = "🚫 Never assigned"
 
             report.append({

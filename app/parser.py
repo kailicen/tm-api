@@ -18,9 +18,12 @@ def fetch_known_members():
 def match_cleaned_name(name, known_names):
     name = name.strip().lower()
     for member in known_names:
-        if member.lower().startswith(name):  # basic fuzzy match
+        member_clean = member.lower().strip()
+        if member_clean == name:  # Full exact match
             return member
-    return clean_name(name)  # fallback to original cleaning
+        if member_clean.startswith(name):  # Partial prefix match
+            return member
+    return clean_name(name)  # fallback
 
 
 def parse_agenda_html(html, agenda_label="Unknown"):

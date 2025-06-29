@@ -6,13 +6,14 @@ import os
 app = FastAPI()
 
 # Allow Vercel frontend to call this API
-# origins = [
-#     "https://your-vercel-app.vercel.app",  # replace this with your actual Vercel URL
-# ]
+origins = [
+    "https://my-tm-app.vercel.app/",  # replace this with your actual Vercel URL
+    "http://localhost:3000/"
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], #origins,  # or ["*"] for testing, but not recommended for production
+    allow_origins=origins, #origins,  # or ["*"] for testing, but not recommended for production
     allow_credentials=True,
     allow_methods=["*"],  # allow all HTTP methods (GET, POST, etc.)
     allow_headers=["*"],  # allow all headers
